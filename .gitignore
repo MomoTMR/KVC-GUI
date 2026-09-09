@@ -1,0 +1,18 @@
+# Kerio Control VPN Client GUI gitignore
+profiles.ini
+
+# Python virtual environment
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# IDE files
+.idea/
+.project
+.pydevproject
+
+# System files
+.DS_Store
+Thumbs.db

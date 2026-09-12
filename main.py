@@ -9,7 +9,8 @@ from PyQt6.QtGui import QFont, QIcon
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QTextEdit, QComboBox, QGroupBox,
-    QSystemTrayIcon, QMenu, QStatusBar, QMessageBox, QTabWidget, QInputDialog
+    QSystemTrayIcon, QMenu, QStatusBar, QMessageBox, QTabWidget, QInputDialog,
+    QCheckBox
 )
 
 CONFIG_PATH = "/etc/kerio-kvc.conf"
@@ -73,6 +74,12 @@ class KerioKvcGUI(QMainWindow):
 
         auth_layout.addLayout(row1)
         auth_layout.addLayout(row2)
+
+        # Чекбокс DNS
+        self.dns_checkbox = QCheckBox("Использовать VPN сервер в качестве DNS server")
+        self.dns_checkbox.setChecked(True)
+        auth_layout.addWidget(self.dns_checkbox)
+
         auth_group.setLayout(auth_layout)
         main_layout.addWidget(auth_group)
 
@@ -149,7 +156,7 @@ class KerioKvcGUI(QMainWindow):
 
     # --- Резервное копирование и запись конфигурации ---
 
-    def backup_update_and_run_systemctl(self, action, server, login, password):
+    def backup_update_and_run_systemctl(self, action, server, login, password, use_vpn_dns=True):
         """Выполняет обновление конфигурации, бэкап и запуск/перезапуск службы за 1 вызов pkexec."""
         # Код вспомогательного Python-скрипта, который будет запущен от root
         helper_code = f"""import os
@@ -162,7 +169,7 @@ import subprocess
 CONFIG_PATH = "/etc/kerio-kvc.conf"
 
 def main():
-    if len(sys.argv) < 5:
+    if len(sys.argv) < 6:
         print("[ОШИБКА] Недостаточно аргументов", file=sys.stderr)
         sys.exit(1)
 
@@ -170,6 +177,7 @@ def main():
     server = sys.argv[2]
     login = sys.argv[3]
     password = sys.argv[4]
+    use_vpn_dns = sys.argv[5] == "1"
 
     # 1. Чтение существующего конфига
     if not os.path.exists(CONFIG_PATH):
@@ -230,6 +238,157 @@ def main():
         res = subprocess.run(["systemctl", action, "kerio-kvc"], capture_output=True, text=True)
         if res.returncode == 0:
             print(f"Команда '{{action}}' успешно выполнена.")
+            
+            # Настройка DNS, если действие start или restart
+            if action in ["start", "restart"]:
+                print("Ожидание появления сетевого интерфейса kvnet...")
+                import time
+                kvnet_ip = None
+                for _ in range(30):  # Ждем до 15 секунд (30 * 0.5s)
+                    # Проверяем, появился ли интерфейс kvnet и получил ли он IP
+                    res_ip = subprocess.run(["ip", "address", "show", "dev", "kvnet"], capture_output=True, text=True)
+                    if res_ip.returncode == 0 and "inet" in res_ip.stdout:
+                        # Интерфейс активен, пытаемся определить адрес VPN-сервера внутри туннеля (peer IP)
+                        
+                        # Метод 1: поиск peer-адреса в ip route show (via)
+                        res_route = subprocess.run(["ip", "route", "show", "dev", "kvnet"], capture_output=True, text=True)
+                        if res_route.returncode == 0:
+                            for line in res_route.stdout.splitlines():
+                                parts = line.split()
+                                if "via" in parts:
+                                    idx = parts.index("via")
+                                    if idx + 1 < len(parts):
+                                        kvnet_ip = parts[idx + 1]
+                                        break
+                        
+                        # Метод 2: поиск peer-адреса в ip address show (peer)
+                        if not kvnet_ip:
+                            for line in res_ip.stdout.splitlines():
+                                if "peer" in line:
+                                    parts = line.split()
+                                    try:
+                                        idx = parts.index("peer")
+                                        if idx + 1 < len(parts):
+                                            kvnet_ip = parts[idx + 1].split("/")[0]
+                                            break
+                                    except ValueError:
+                                        pass
+                                        
+                        # Метод 3: если peer не определен, берем первый IP-адрес подсети (.1)
+                        if not kvnet_ip:
+                            for line in res_route.stdout.splitlines():
+                                parts = line.split()
+                                if "src" in parts:
+                                    idx = parts.index("src")
+                                    if idx + 1 < len(parts):
+                                        src_ip = parts[idx + 1]
+                                        octets = src_ip.split(".")
+                                        if len(octets) == 4:
+                                            octets[3] = "1"
+                                            kvnet_ip = ".".join(octets)
+                                            break
+                        
+                        if kvnet_ip:
+                            print(f"Обнаружен внутренний IP-адрес VPN-сервера: {{kvnet_ip}}")
+                            break
+                    time.sleep(0.5)
+
+                if use_vpn_dns:
+                    if kvnet_ip:
+                        print(f"Настройка DNS для интерфейса kvnet на адрес {{kvnet_ip}}...")
+                        
+                        # Пытаемся настроить через resolvectl (systemd-resolved)
+                        try:
+                            subprocess.run(["resolvectl", "dns", "kvnet", kvnet_ip], check=True, capture_output=True)
+                            subprocess.run(["resolvectl", "domain", "kvnet", "~."], check=True, capture_output=True)
+                            print("DNS успешно настроен в системе через resolvectl.")
+                        except Exception as e_res:
+                            print(f"[ПРЕДУПРЕЖДЕНИЕ] Не удалось настроить через resolvectl: {{e_res}}")
+                            
+                            # Альтернативный вариант: пишем в начало /etc/resolv.conf
+                            try:
+                                resolv_path = "/etc/resolv.conf"
+                                if os.path.exists(resolv_path):
+                                    with open(resolv_path, "r") as f_r:
+                                        content = f_r.read()
+                                    if f"nameserver {{kvnet_ip}}" not in content:
+                                        with open(resolv_path, "w") as f_w:
+                                            f_w.write(f"nameserver {{kvnet_ip}}\\n" + content)
+                                        print("DNS успешно добавлен в начало /etc/resolv.conf.")
+                            except Exception as e_file:
+                                print(f"[ОШИБКА] Ошибка записи в /etc/resolv.conf: {{e_file}}", file=sys.stderr)
+                    else:
+                        print("[ПРЕДУПРЕЖДЕНИЕ] Не удалось определить внутренний IP-адрес VPN-сервера или сетевой интерфейс kvnet не поднялся.")
+                else:
+                    # Если галочка СНЯТА, возвращаемся к системным DNS серверам
+                    print("Режим: Системный DNS по умолчанию. Поиск системных DNS-серверов...")
+                    dns_servers = []
+                    
+                    # 1. Попробуем найти физический интерфейс по умолчанию (не kvnet)
+                    res_route = subprocess.run(["ip", "route", "show"], capture_output=True, text=True)
+                    default_dev = None
+                    if res_route.returncode == 0:
+                        for line in res_route.stdout.splitlines():
+                            parts = line.split()
+                            if parts and parts[0] == "default" and "dev" in parts:
+                                idx = parts.index("dev")
+                                if idx + 1 < len(parts):
+                                    dev = parts[idx + 1]
+                                    if dev != "kvnet":
+                                        default_dev = dev
+                                        break
+                    
+                    if default_dev:
+                        print(f"Обнаружен системный сетевой интерфейс по умолчанию: {{default_dev}}")
+                        # Попробуем получить DNS для этого интерфейса через resolvectl dns <dev>
+                        res_dns = subprocess.run(["resolvectl", "dns", default_dev], capture_output=True, text=True)
+                        if res_dns.returncode == 0:
+                            parts = res_dns.stdout.strip().split()
+                            for p in parts:
+                                if "." in p or ":" in p:
+                                    clean_p = "".join(c for c in p if c.isalnum() or c in ".:-")
+                                    if clean_p and (clean_p[0].isdigit() or clean_p.startswith("fe80")):
+                                        dns_servers.append(clean_p)
+
+                    # 2. Если resolvectl не дал результатов, пробуем прочитать из бэкапов resolv.conf или NetworkManager
+                    if not dns_servers:
+                        for path in ["/run/NetworkManager/resolv.conf", "/run/resolvconf/resolv.conf", "/run/systemd/resolve/resolv.conf"]:
+                            if os.path.exists(path):
+                                try:
+                                    with open(path, "r") as f:
+                                        for line in f:
+                                            if line.strip().startswith("nameserver"):
+                                                parts = line.split()
+                                                if len(parts) > 1:
+                                                    dns_servers.append(parts[1].strip())
+                                except Exception:
+                                    pass
+
+                    # 3. Фолбек на Google и Cloudflare, если вообще ничего не найдено
+                    if not dns_servers:
+                        dns_servers = ["8.8.8.8", "1.1.1.1"]
+
+                    print(f"Системные DNS-серверы для возврата: {{dns_servers}}")
+                    
+                    # Принудительно настраиваем системные DNS на интерфейс kvnet через resolvectl
+                    try:
+                        subprocess.run(["resolvectl", "revert", "kvnet"], capture_output=True)
+                        subprocess.run(["resolvectl", "dns", "kvnet"] + dns_servers, check=True, capture_output=True)
+                        subprocess.run(["resolvectl", "domain", "kvnet", "~."], check=True, capture_output=True)
+                        print("Системные DNS успешно прописаны для интерфейса kvnet через resolvectl.")
+                    except Exception as e_res:
+                        print(f"[ПРЕДУПРЕЖДЕНИЕ] Не удалось настроить revert/dns через resolvectl: {{e_res}}")
+                        
+                        # Альтернативный вариант: перезаписываем /etc/resolv.conf оригинальными DNS
+                        try:
+                            resolv_path = "/etc/resolv.conf"
+                            with open(resolv_path, "w") as f_w:
+                                f_w.write("# Generated by Kerio KVC GUI\\n")
+                                for s in dns_servers:
+                                    f_w.write(f"nameserver {{s}}\\n")
+                            print("Системные DNS успешно восстановлены в /etc/resolv.conf.")
+                        except Exception as e_file:
+                            print(f"[ОШИБКА] Ошибка восстановления /etc/resolv.conf: {{e_file}}", file=sys.stderr)
         else:
             print(f"[ОШИБКА] systemctl {{action}} завершился с кодом {{res.returncode}}: {{res.stderr.strip()}}", file=sys.stderr)
             sys.exit(res.returncode)
@@ -251,8 +410,9 @@ if __name__ == '__main__':
         # Единственный вызов pkexec с передачей аргументов
         import subprocess
         try:
+            use_dns_str = "1" if use_vpn_dns else "0"
             res = subprocess.run([
-                "pkexec", "python3", temp_script.name, action, server, login, password
+                "pkexec", "python3", temp_script.name, action, server, login, password, use_dns_str
             ], capture_output=True, text=True)
             
             # Удаляем временный файл скрипта сразу же
@@ -308,11 +468,14 @@ if __name__ == '__main__':
         server = self.settings.value("server", "")
         login = self.settings.value("login", "")
         password = self.settings.value("password", "")
+        use_dns_val = self.settings.value("use_vpn_dns", "true")
+        use_vpn_dns = (use_dns_val == "true" or use_dns_val is True or use_dns_val == 1)
         self.settings.endGroup()
 
         self.server_input.setText(server)
         self.login_input.setText(login)
         self.pass_input.setText(password)
+        self.dns_checkbox.setChecked(use_vpn_dns)
 
         self.status_bar.showMessage(f"Загружен профиль: {profile_name}")
         self.log_area.append(f"--- Загружен профиль '{profile_name}' ---")
@@ -334,6 +497,7 @@ if __name__ == '__main__':
             self.settings.setValue("server", self.server_input.text().strip())
             self.settings.setValue("login", self.login_input.text().strip())
             self.settings.setValue("password", self.pass_input.text().strip())
+            self.settings.setValue("use_vpn_dns", "true" if self.dns_checkbox.isChecked() else "false")
             self.settings.endGroup()
 
             self.load_profiles_to_combo()
@@ -372,7 +536,8 @@ if __name__ == '__main__':
         server = self.server_input.text().strip()
         login = self.login_input.text().strip()
         password = self.pass_input.text().strip()
-        self.backup_update_and_run_systemctl("start", server, login, password)
+        use_vpn_dns = self.dns_checkbox.isChecked()
+        self.backup_update_and_run_systemctl("start", server, login, password, use_vpn_dns)
 
     def stop_service(self):
         self.run_pkexec_systemctl("stop")
@@ -381,7 +546,8 @@ if __name__ == '__main__':
         server = self.server_input.text().strip()
         login = self.login_input.text().strip()
         password = self.pass_input.text().strip()
-        self.backup_update_and_run_systemctl("restart", server, login, password)
+        use_vpn_dns = self.dns_checkbox.isChecked()
+        self.backup_update_and_run_systemctl("restart", server, login, password, use_vpn_dns)
 
     def check_service_status(self):
         process = QProcess()

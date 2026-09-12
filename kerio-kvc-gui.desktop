@@ -2,8 +2,9 @@
 Type=Application
 Name=Kerio Control VPN Client GUI
 Comment=GUI Client for Kerio Control VPN
-Exec=~/KVC-GUI/.venv/bin/python ~/KVC-GUI/main.py
+Exec=/home/KVC-GUI/.venv/bin/python /home/KVC-GUI/main.py
 Icon=network-vpn
 Terminal=false
 Categories=Network;Settings;
 StartupNotify=true
+StartupWMClass=kerio-kvc-gui

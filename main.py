@@ -5,7 +5,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime
 
 from PyQt6.QtCore import QProcess, QSettings, QTimer, QLoggingCategory, QLockFile
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QIcon
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QTextEdit, QComboBox, QGroupBox,
@@ -20,6 +20,7 @@ class KerioKvcGUI(QMainWindow):
         super().__init__()
         self.lock_file = None
         self.setWindowTitle("Kerio Control VPN Client GUI")
+        self.setWindowIcon(QIcon.fromTheme("network-vpn"))
         self.resize(720, 580)
 
         # Хранилище профилей (profiles.ini в папке проекта)
@@ -315,6 +316,7 @@ if __name__ == '__main__':
 
         self.status_bar.showMessage(f"Загружен профиль: {profile_name}")
         self.log_area.append(f"--- Загружен профиль '{profile_name}' ---")
+        self.check_service_status()
 
     def save_profile(self):
         current_name = self.profile_combo.currentText()
@@ -349,6 +351,7 @@ if __name__ == '__main__':
                                 f"Удалить профиль '{profile_name}'?") == QMessageBox.StandardButton.Yes:
             self.settings.remove(profile_name)
             self.load_profiles_to_combo()
+            self.check_service_status()
 
     # --- Управление systemctl через pkexec ---
 
@@ -386,13 +389,20 @@ if __name__ == '__main__':
         process.waitForFinished(1000)
 
         status = process.readAllStandardOutput().data().decode("utf-8").strip()
+        
+        current_profile = self.profile_combo.currentText()
+        if not current_profile or current_profile == "— Выберите профиль —":
+            profile_suffix = ""
+        else:
+            profile_suffix = f" | Профиль: {current_profile}"
+
         if status == "active":
-            self.status_label.setText("Статус: ПОДКЛЮЧЕНО (active)")
+            self.status_label.setText(f"Статус: ПОДКЛЮЧЕНО (active){profile_suffix}")
             self.status_label.setStyleSheet("color: green; font-weight: bold;")
             self.btn_start.setEnabled(False)
             self.btn_stop.setEnabled(True)
         else:
-            self.status_label.setText(f"Статус: ОТКЛЮЧЕНО ({status})")
+            self.status_label.setText(f"Статус: ОТКЛЮЧЕНО ({status}){profile_suffix}")
             self.status_label.setStyleSheet("color: red; font-weight: bold;")
             self.btn_start.setEnabled(True)
             self.btn_stop.setEnabled(False)
@@ -408,7 +418,7 @@ if __name__ == '__main__':
 
     def init_tray(self):
         self.tray_icon = QSystemTrayIcon(self)
-        self.tray_icon.setIcon(self.style().standardIcon(self.style().StandardPixmap.SP_ComputerIcon))
+        self.tray_icon.setIcon(QIcon.fromTheme("network-vpn", self.style().standardIcon(self.style().StandardPixmap.SP_ComputerIcon)))
         self.tray_icon.activated.connect(self.on_tray_icon_activated)
 
         self.tray_menu = QMenu()
@@ -473,7 +483,14 @@ if __name__ == '__main__':
 
 def main():
     QLoggingCategory.setFilterRules("qt.svg.draw=false")
+    
+    # Задаем имя процесса для корректного WM_CLASS в Linux (X11/Wayland)
+    sys.argv[0] = "kerio-kvc-gui"
+    
     app = QApplication(sys.argv)
+    app.setApplicationName("kerio-kvc-gui")
+    app.setApplicationDisplayName("KVC GUI")
+    app.setDesktopFileName("kerio-kvc-gui")
 
     # Инициализация файла блокировки для предотвращения повторного запуска
     lock_file_path = os.path.join(tempfile.gettempdir(), "kerio_kvc_gui.lock")

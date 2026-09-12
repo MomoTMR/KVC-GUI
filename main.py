@@ -5,7 +5,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime
 
 from PyQt6.QtCore import QProcess, QSettings, QTimer, QLoggingCategory, QLockFile
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QIcon
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QTextEdit, QComboBox, QGroupBox,
@@ -20,6 +20,7 @@ class KerioKvcGUI(QMainWindow):
         super().__init__()
         self.lock_file = None
         self.setWindowTitle("Kerio Control VPN Client GUI")
+        self.setWindowIcon(QIcon.fromTheme("network-vpn"))
         self.resize(720, 580)
 
         # Хранилище профилей (profiles.ini в папке проекта)
@@ -408,7 +409,7 @@ if __name__ == '__main__':
 
     def init_tray(self):
         self.tray_icon = QSystemTrayIcon(self)
-        self.tray_icon.setIcon(self.style().standardIcon(self.style().StandardPixmap.SP_ComputerIcon))
+        self.tray_icon.setIcon(QIcon.fromTheme("network-vpn", self.style().standardIcon(self.style().StandardPixmap.SP_ComputerIcon)))
         self.tray_icon.activated.connect(self.on_tray_icon_activated)
 
         self.tray_menu = QMenu()
@@ -473,7 +474,14 @@ if __name__ == '__main__':
 
 def main():
     QLoggingCategory.setFilterRules("qt.svg.draw=false")
+    
+    # Задаем имя процесса для корректного WM_CLASS в Linux (X11/Wayland)
+    sys.argv[0] = "kerio-kvc-gui"
+    
     app = QApplication(sys.argv)
+    app.setApplicationName("kerio-kvc-gui")
+    app.setApplicationDisplayName("KVC GUI")
+    app.setDesktopFileName("kerio-kvc-gui")
 
     # Инициализация файла блокировки для предотвращения повторного запуска
     lock_file_path = os.path.join(tempfile.gettempdir(), "kerio_kvc_gui.lock")

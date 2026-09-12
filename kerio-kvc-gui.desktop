@@ -7,3 +7,4 @@ Icon=network-vpn
 Terminal=false
 Categories=Network;Settings;
 StartupNotify=true
+StartupWMClass=kerio-kvc-gui
